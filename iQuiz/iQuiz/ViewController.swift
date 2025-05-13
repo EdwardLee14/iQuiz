@@ -6,105 +6,56 @@
 
 import UIKit
 
-struct QuizTopic {
-    let title: String
-    let description: String
-    let icon: UIImage
-}
-
-struct Question {
-    let text: String
-    let options: [String]
-    let correctAnswerIndex: Int
-}
-
-class ViewController: UIViewController, UITableViewDelegate, UITableViewDataSource {
+class ViewController: UIViewController, UITableViewDelegate, UITableViewDataSource, SettingsViewControllerDelegate {
     
     private let tableView = UITableView()
+    private let refreshControl = UIRefreshControl()
+    private let loadingIndicator = UIActivityIndicatorView(style: .large)
+    private var refreshTimer: Timer?
     
-    private let quizTopics = [
-        QuizTopic(
-            title: "Mathematics",
-            description: "Test your math knowledge with algebra, geometry, and more",
-            icon: UIImage(systemName: "function") ?? UIImage(systemName: "questionmark.circle")!
-        ),
-        QuizTopic(
-            title: "Marvel Super Heroes",
-            description: "How well do you know your favorite Marvel characters?",
-            icon: UIImage(systemName: "bolt.fill") ?? UIImage(systemName: "questionmark.circle")!
-        ),
-        QuizTopic(
-            title: "Science",
-            description: "Challenge yourself with questions about physics, chemistry, and biology",
-            icon: UIImage(systemName: "atom") ?? UIImage(systemName: "questionmark.circle")!
-        )
-    ]
+    // Data sources
+    private var quizTopics: [QuizTopic] = []
+    private var quizQuestions: [[Question]] = []
     
-    // Questions for each topic
-    private let quizQuestions = [
-        // Math questions
-        [
-            Question(
-                text: "What is 15% of 200?",
-                options: ["25", "30", "35", "40"],
-                correctAnswerIndex: 1
-            ),
-            Question(
-                text: "What is the next prime number after 7?",
-                options: ["9", "10", "11", "13"],
-                correctAnswerIndex: 2
-            ),
-            Question(
-                text: "What is the value of 2^3?",
-                options: ["6", "8", "9", "12"],
-                correctAnswerIndex: 1
-            )
-        ],
-        
-        // Marvel questions
-        [
-            Question(
-                text: "What is the name of Thor's hammer?",
-                options: ["Stormbreaker", "Gungnir", "Mjolnir", "Aegis"],
-                correctAnswerIndex: 2
-            ),
-            Question(
-                text: "Which Marvel character turns green when angry?",
-                options: ["Hawkeye", "Hulk", "Wolverine", "Cyclops"],
-                correctAnswerIndex: 1
-            ),
-            Question(
-                text: "Which superhero is from Wakanda?",
-                options: ["Black Panther", "Doctor Strange", "Iron Fist", "Falcon"],
-                correctAnswerIndex: 0
-            )
-        ],
-        
-        // Science questions
-        [
-            Question(
-                text: "What gas do plants absorb from the atmosphere?",
-                options: ["Oxygen", "Carbon Dioxide", "Nitrogen", "Helium"],
-                correctAnswerIndex: 1
-            ),
-            Question(
-                text: "What part of the cell contains genetic material?",
-                options: ["Cytoplasm", "Ribosome", "Nucleus", "Mitochondria"],
-                correctAnswerIndex: 2
-            ),
-            Question(
-                text: "At what temperature does water boil at sea level (in Celsius)?",
-                options: ["90°C", "95°C", "100°C", "105°C"],
-                correctAnswerIndex: 2
-            )
-        ]
-    ]
-
+    // Online status banner
+    private let offlineBanner = UIView()
+    private let offlineLabel = UILabel()
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         setupTableView()
         setupNavigationBar()
+        setupOfflineBanner()
+        setupLoadingIndicator()
+        
+        // Register for network status notifications
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(networkStatusChanged(_:)),
+            name: Notification.Name("NetworkStatusChanged"),
+            object: nil
+        )
+        
+        // Initial data fetch
+        loadData()
     }
+    
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        
+        // Check network status and update UI
+        updateOfflineBanner()
+        
+        // Set up auto refresh timer if enabled
+        setupAutoRefreshTimer()
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        refreshTimer?.invalidate()
+    }
+    
+    // Setup Methods
     
     private func setupTableView() {
         view.addSubview(tableView)
@@ -116,6 +67,10 @@ class ViewController: UIViewController, UITableViewDelegate, UITableViewDataSour
         tableView.dataSource = self
         
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "QuizCell")
+        
+        // Add pull to refresh
+        refreshControl.addTarget(self, action: #selector(refreshData), for: .valueChanged)
+        tableView.refreshControl = refreshControl
     }
     
     private func setupNavigationBar() {
@@ -125,28 +80,278 @@ class ViewController: UIViewController, UITableViewDelegate, UITableViewDataSour
             image: UIImage(systemName: "gear"),
             style: .plain,
             target: self,
-            action: #selector(showSettingsAlert)
+            action: #selector(showSettings)
         )
         
         navigationItem.rightBarButtonItem = settingsButton
     }
     
-    @objc private func showSettingsAlert() {
-        let alertController = UIAlertController(
-            title: "Settings",
-            message: "Settings go here",
-            preferredStyle: .alert
-        )
+    private func setupOfflineBanner() {
+        offlineBanner.backgroundColor = .systemRed
+        offlineBanner.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(offlineBanner)
         
-        let okAction = UIAlertAction(
-            title: "OK",
-            style: .default,
-            handler: nil
-        )
-        alertController.addAction(okAction)
+        offlineLabel.text = "No network connection available"
+        offlineLabel.textColor = .white
+        offlineLabel.textAlignment = .center
+        offlineLabel.translatesAutoresizingMaskIntoConstraints = false
+        offlineBanner.addSubview(offlineLabel)
         
-        present(alertController, animated: true, completion: nil)
+        NSLayoutConstraint.activate([
+            offlineBanner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            offlineBanner.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            offlineBanner.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            offlineBanner.heightAnchor.constraint(equalToConstant: 40),
+            
+            offlineLabel.centerYAnchor.constraint(equalTo: offlineBanner.centerYAnchor),
+            offlineLabel.leadingAnchor.constraint(equalTo: offlineBanner.leadingAnchor, constant: 10),
+            offlineLabel.trailingAnchor.constraint(equalTo: offlineBanner.trailingAnchor, constant: -10)
+        ])
+        
+        offlineBanner.isHidden = true
     }
+    
+    private func setupLoadingIndicator() {
+        loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        loadingIndicator.hidesWhenStopped = true
+        view.addSubview(loadingIndicator)
+        
+        NSLayoutConstraint.activate([
+            loadingIndicator.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            loadingIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+    }
+    
+    private func setupAutoRefreshTimer() {
+        refreshTimer?.invalidate()
+        
+        if SettingsManager.shared.isAutoRefreshEnabled {
+            let interval = TimeInterval(SettingsManager.shared.refreshInterval)
+            refreshTimer = Timer.scheduledTimer(timeInterval: interval,
+                                               target: self,
+                                               selector: #selector(autoRefreshData),
+                                               userInfo: nil,
+                                               repeats: true)
+        }
+    }
+    
+    // Data Methods
+    
+    private func loadData() {
+        // Check if we're online
+        if !NetworkManager.shared.isNetworkAvailable {
+            // If we have default data, show it
+            if quizTopics.isEmpty {
+                loadDefaultData()
+            }
+            
+            // Show network error
+            let alert = UIAlertController(
+                title: "Network Unavailable",
+                message: "Cannot connect to the internet. Showing local data.",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
+            
+            return
+        }
+        
+        // Show loading indicator
+        loadingIndicator.startAnimating()
+        
+        // Fetch data from API
+        NetworkManager.shared.fetchQuizData(from: SettingsManager.shared.dataSourceURL) { [weak self] quizData, error in
+            DispatchQueue.main.async {
+                self?.loadingIndicator.stopAnimating()
+                self?.refreshControl.endRefreshing()
+                
+                if let error = error {
+                    print("Error fetching quiz data: \(error.localizedDescription)")
+                    
+                    // Show error and load default data if we don't have any data yet
+                    self?.showAlert(title: "Error", message: "Failed to load quiz data: \(error.localizedDescription)")
+                    
+                    if self?.quizTopics.isEmpty ?? true {
+                        self?.loadDefaultData()
+                    }
+                    
+                    return
+                }
+                
+                guard let quizData = quizData else {
+                    print("No quiz data returned")
+                    return
+                }
+                
+                // Convert API data to app model
+                let convertedData = NetworkManager.shared.convertToAppModel(from: quizData)
+                
+                // Split into topics and questions
+                self?.quizTopics = convertedData.map { $0.topic }
+                self?.quizQuestions = convertedData.map { $0.questions }
+                
+                // Reload table view
+                self?.tableView.reloadData()
+            }
+        }
+    }
+    
+    private func loadDefaultData() {
+        // Default quiz topics
+        quizTopics = [
+            QuizTopic(
+                title: "Mathematics",
+                description: "Test your math knowledge with algebra, geometry, and more",
+                icon: UIImage(systemName: "function") ?? UIImage(systemName: "questionmark.circle")!
+            ),
+            QuizTopic(
+                title: "Marvel Super Heroes",
+                description: "How well do you know your favorite Marvel characters?",
+                icon: UIImage(systemName: "bolt.fill") ?? UIImage(systemName: "questionmark.circle")!
+            ),
+            QuizTopic(
+                title: "Science",
+                description: "Challenge yourself with questions about physics, chemistry, and biology",
+                icon: UIImage(systemName: "atom") ?? UIImage(systemName: "questionmark.circle")!
+            )
+        ]
+        
+        // Default questions for each topic
+        quizQuestions = [
+            // Math questions
+            [
+                Question(
+                    text: "What is 15% of 200?",
+                    options: ["25", "30", "35", "40"],
+                    correctAnswerIndex: 1
+                ),
+                Question(
+                    text: "What is the next prime number after 7?",
+                    options: ["9", "10", "11", "13"],
+                    correctAnswerIndex: 2
+                ),
+                Question(
+                    text: "What is the value of 2^3?",
+                    options: ["6", "8", "9", "12"],
+                    correctAnswerIndex: 1
+                )
+            ],
+            
+            // Marvel questions
+            [
+                Question(
+                    text: "What is the name of Thor's hammer?",
+                    options: ["Stormbreaker", "Gungnir", "Mjolnir", "Aegis"],
+                    correctAnswerIndex: 2
+                ),
+                Question(
+                    text: "Which Marvel character turns green when angry?",
+                    options: ["Hawkeye", "Hulk", "Wolverine", "Cyclops"],
+                    correctAnswerIndex: 1
+                ),
+                Question(
+                    text: "Which superhero is from Wakanda?",
+                    options: ["Black Panther", "Doctor Strange", "Iron Fist", "Falcon"],
+                    correctAnswerIndex: 0
+                )
+            ],
+            
+            // Science questions
+            [
+                Question(
+                    text: "What gas do plants absorb from the atmosphere?",
+                    options: ["Oxygen", "Carbon Dioxide", "Nitrogen", "Helium"],
+                    correctAnswerIndex: 1
+                ),
+                Question(
+                    text: "What part of the cell contains genetic material?",
+                    options: ["Cytoplasm", "Ribosome", "Nucleus", "Mitochondria"],
+                    correctAnswerIndex: 2
+                ),
+                Question(
+                    text: "At what temperature does water boil at sea level (in Celsius)?",
+                    options: ["90°C", "95°C", "100°C", "105°C"],
+                    correctAnswerIndex: 2
+                )
+            ]
+        ]
+        
+        tableView.reloadData()
+    }
+    
+    @objc private func refreshData() {
+        loadData()
+    }
+    
+    @objc private func autoRefreshData() {
+        // Only auto refresh if online
+        if NetworkManager.shared.isNetworkAvailable {
+            loadData()
+        }
+    }
+    
+    // Network Status
+    
+    @objc private func networkStatusChanged(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            self?.updateOfflineBanner()
+        }
+    }
+    
+    private func updateOfflineBanner() {
+        let isOffline = !NetworkManager.shared.isNetworkAvailable
+        
+        // Only animate if visibility is changing
+        if offlineBanner.isHidden == isOffline {
+            if isOffline {
+                // Show banner
+                self.offlineBanner.isHidden = false
+                self.offlineBanner.alpha = 0
+                
+                UIView.animate(withDuration: 0.3) {
+                    self.offlineBanner.alpha = 1
+                }
+            } else {
+                // Hide banner
+                UIView.animate(withDuration: 0.3, animations: {
+                    self.offlineBanner.alpha = 0
+                }) { _ in
+                    self.offlineBanner.isHidden = true
+                }
+            }
+        }
+        
+        // Adjust table view insets if banner is visible
+        let topInset: CGFloat = isOffline ? 40 : 0
+        tableView.contentInset = UIEdgeInsets(top: topInset, left: 0, bottom: 0, right: 0)
+    }
+    
+    // Actions
+    
+    @objc private func showSettings() {
+        let settingsVC = SettingsViewController()
+        settingsVC.delegate = self
+        navigationController?.pushViewController(settingsVC, animated: true)
+    }
+    
+    private func showAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+    
+    // SettingsViewControllerDelegate
+    
+    func didUpdateSettings() {
+        setupAutoRefreshTimer()
+    }
+    
+    func didCheckForUpdates() {
+        loadData()
+    }
+    
+    // UITableViewDataSource
     
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         return quizTopics.count
@@ -172,12 +377,20 @@ class ViewController: UIViewController, UITableViewDelegate, UITableViewDataSour
         return cell
     }
     
+    // UITableViewDelegate
+    
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         return 70
     }
     
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        
+        // Make sure we have questions for this topic
+        guard indexPath.row < quizQuestions.count else {
+            showAlert(title: "Error", message: "No questions available for this topic.")
+            return
+        }
         
         // Start the quiz with the selected topic
         startQuiz(topicIndex: indexPath.row)
