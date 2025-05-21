@@ -5,6 +5,7 @@
 //
 
 import UIKit
+import SystemConfiguration
 
 struct QuizTopic {
     let title: String
@@ -21,89 +22,17 @@ struct Question {
 class ViewController: UIViewController, UITableViewDelegate, UITableViewDataSource {
     
     private let tableView = UITableView()
+    private let refreshControl = UIRefreshControl()
     
-    private let quizTopics = [
-        QuizTopic(
-            title: "Mathematics",
-            description: "Test your math knowledge with algebra, geometry, and more",
-            icon: UIImage(systemName: "function") ?? UIImage(systemName: "questionmark.circle")!
-        ),
-        QuizTopic(
-            title: "Marvel Super Heroes",
-            description: "How well do you know your favorite Marvel characters?",
-            icon: UIImage(systemName: "bolt.fill") ?? UIImage(systemName: "questionmark.circle")!
-        ),
-        QuizTopic(
-            title: "Science",
-            description: "Challenge yourself with questions about physics, chemistry, and biology",
-            icon: UIImage(systemName: "atom") ?? UIImage(systemName: "questionmark.circle")!
-        )
-    ]
+    private var quizTopics: [QuizTopic] = []
+    private var quizQuestions: [[Question]] = []
+    private var isLoading = false
     
-    // Questions for each topic
-    private let quizQuestions = [
-        // Math questions
-        [
-            Question(
-                text: "What is 15% of 200?",
-                options: ["25", "30", "35", "40"],
-                correctAnswerIndex: 1
-            ),
-            Question(
-                text: "What is the next prime number after 7?",
-                options: ["9", "10", "11", "13"],
-                correctAnswerIndex: 2
-            ),
-            Question(
-                text: "What is the value of 2^3?",
-                options: ["6", "8", "9", "12"],
-                correctAnswerIndex: 1
-            )
-        ],
-        
-        // Marvel questions
-        [
-            Question(
-                text: "What is the name of Thor's hammer?",
-                options: ["Stormbreaker", "Gungnir", "Mjolnir", "Aegis"],
-                correctAnswerIndex: 2
-            ),
-            Question(
-                text: "Which Marvel character turns green when angry?",
-                options: ["Hawkeye", "Hulk", "Wolverine", "Cyclops"],
-                correctAnswerIndex: 1
-            ),
-            Question(
-                text: "Which superhero is from Wakanda?",
-                options: ["Black Panther", "Doctor Strange", "Iron Fist", "Falcon"],
-                correctAnswerIndex: 0
-            )
-        ],
-        
-        // Science questions
-        [
-            Question(
-                text: "What gas do plants absorb from the atmosphere?",
-                options: ["Oxygen", "Carbon Dioxide", "Nitrogen", "Helium"],
-                correctAnswerIndex: 1
-            ),
-            Question(
-                text: "What part of the cell contains genetic material?",
-                options: ["Cytoplasm", "Ribosome", "Nucleus", "Mitochondria"],
-                correctAnswerIndex: 2
-            ),
-            Question(
-                text: "At what temperature does water boil at sea level (in Celsius)?",
-                options: ["90°C", "95°C", "100°C", "105°C"],
-                correctAnswerIndex: 2
-            )
-        ]
-    ]
-
     override func viewDidLoad() {
         super.viewDidLoad()
         setupTableView()
         setupNavigationBar()
+        loadQuizData()
     }
     
     private func setupTableView() {
@@ -116,6 +45,10 @@ class ViewController: UIViewController, UITableViewDelegate, UITableViewDataSour
         tableView.dataSource = self
         
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "QuizCell")
+        
+        // Add refresh control
+        refreshControl.addTarget(self, action: #selector(handleRefresh), for: .valueChanged)
+        tableView.refreshControl = refreshControl
     }
     
     private func setupNavigationBar() {
@@ -125,28 +58,77 @@ class ViewController: UIViewController, UITableViewDelegate, UITableViewDataSour
             image: UIImage(systemName: "gear"),
             style: .plain,
             target: self,
-            action: #selector(showSettingsAlert)
+            action: #selector(showSettings)
         )
         
         navigationItem.rightBarButtonItem = settingsButton
     }
     
-    @objc private func showSettingsAlert() {
-        let alertController = UIAlertController(
-            title: "Settings",
-            message: "Settings go here",
-            preferredStyle: .alert
-        )
-        
-        let okAction = UIAlertAction(
-            title: "OK",
-            style: .default,
-            handler: nil
-        )
-        alertController.addAction(okAction)
-        
-        present(alertController, animated: true, completion: nil)
+    @objc private func handleRefresh() {
+        loadQuizData(forceRefresh: true)
     }
+    
+    private func loadQuizData(forceRefresh: Bool = false) {
+        // Always use local data if offline
+        if !QuizDataService.shared.isOnline() || !forceRefresh {
+            loadLocalData()
+            return
+        }
+        
+        isLoading = true
+        
+        QuizDataService.shared.fetchRemoteQuizzes { [weak self] quizzes, error in
+            guard let self = self else { return }
+            
+            self.isLoading = false
+            self.refreshControl.endRefreshing()
+            
+            if let error = error {
+                print("Error fetching quizzes: \(error)")
+                self.showAlert(title: "Error", message: "Could not fetch quiz data. Using local data instead.")
+                self.loadLocalData()
+                return
+            }
+            
+            if let quizzes = quizzes {
+                // Save fetched data
+                QuizDataService.shared.saveQuizTopics(quizzes)
+                
+                // Load the fetched data
+                self.loadLocalData()
+            }
+        }
+    }
+    
+    private func loadLocalData() {
+        let quizTopicData = QuizDataService.shared.loadLocalQuizTopics()
+        
+        // Clear existing data
+        quizTopics.removeAll()
+        quizQuestions.removeAll()
+        
+        // Convert data models to view models
+        for topic in quizTopicData {
+            quizTopics.append(topic.toQuizTopic())
+            quizQuestions.append(topic.getQuestions())
+        }
+        
+        tableView.reloadData()
+    }
+    
+    private func showAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+    
+    @objc private func showSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        }
+    }
+    
+    // MARK: - UITableViewDelegate & UITableViewDataSource
     
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         return quizTopics.count
@@ -509,11 +491,6 @@ class FinishedViewController: UIViewController {
                 correctCount += 1
             }
         }
-        
-        // For debugging
-        print("User answers at finish: \(userAnswers)")
-        print("Questions count: \(questions.count)")
-        print("Correct count: \(correctCount)")
         
         // Set title based on performance
         let percentage = Double(correctCount) / Double(questions.count)
